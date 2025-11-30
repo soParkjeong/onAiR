@@ -14,9 +14,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.card.MaterialCardView
 import com.onair.mobile.OnairApp
 import com.onair.mobile.R
@@ -45,7 +43,6 @@ import com.onair.mobile.assistant.domain.entity.IntentType
 import com.onair.mobile.assistant.core.model.dto.IntentResultDto
 import com.onair.mobile.assistant.core.model.dto.CvDetectionFailedDto
 import com.onair.mobile.assistant.core.model.dto.CvDetectionNormalDto
-import com.onair.mobile.assistant.core.model.dto.CvDetectionAnomalyDto
 import com.onair.mobile.communicate.data.socket.dto.StructuredAnswer
 import com.onair.mobile.communicate.data.source.remote.SocketHolder
 import com.onair.mobile.communicate.presentation.viewmodel.CommunicationViewModel
@@ -76,15 +73,12 @@ class WorkingActivity : AppCompatActivity() {
     private lateinit var ttsRepository: TtsRepositoryImpl
     private lateinit var mediaPlayerController: MediaPlayerController
     private lateinit var raspberryPiControlRepository: RaspberryPiControlRepository
-//    private lateinit var tokenManager: TokenManager
-//    private lateinit var webRtcRepository: WebRtcRepository
     private lateinit var authRepository: AuthRepository
     private val preferenceUtil = PreferenceUtil
     private var description: String = ""  // 기본값 설정 (CV 탐지 실패/정상 케이스에서도 사용)
     private var aiOnDialog: AiOnDialog? = null
     private var onAirOnDialog:  OnAirOnDialog? = null
     private var isActivityResumed = false  // Activity가 resume 상태인지 추적
-    private var hasSentCommunicationClose = false  // communication_close 이벤트 전송 여부 추적
 
     private val TAG = "WorkingActivity"
 
@@ -135,7 +129,6 @@ class WorkingActivity : AppCompatActivity() {
                 if (!socketIoSttClient.isConnected()){
                     socketIoSttClient.connect()
                     Log.i(TAG, "✅ Socket.IO 클라이언트 연결 시작: $FASTAPI_SERVER_URL")
-                    Log.d(TAG, hasSentCommunicationClose.toString())
                 }
             }
         } catch (e: Exception) {
@@ -205,12 +198,6 @@ class WorkingActivity : AppCompatActivity() {
         // 비정상 종료 시 wakeword 대기 상태로 복귀
         // 중복 전송 방지: 아직 전송하지 않은 경우에만 전송
         if (::socketIoSttClient.isInitialized) {
-//            if (!hasSentCommunicationClose) {
-//                sendCommunicationCloseForRecovery()
-//                hasSentCommunicationClose = true
-//            } else {
-//                Log.i(TAG, "ℹ️ communication_close 이벤트는 이미 전송됨 (중복 방지)")
-//            }
             socketIoSttClient.disconnect()
             workingViewModel.onFlowCompleted()
             Log.d(TAG, "현재 상태1: ${workingViewModel.onAirState}")
@@ -236,42 +223,16 @@ class WorkingActivity : AppCompatActivity() {
         binding.endButton.setOnClickListener {
             workingViewModel.endTask(taskId, "")
         }
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                socketIoSttClient.videoFrames.collect { value ->
-                    value.let {
-                        val bitmap = it.toBitmap()
-                        val cropped = bitmap?.toBottomCropped()
-                        binding.videoView.setImageBitmap(cropped)
-                    }
-                }
-            }
-        }
         binding.serviceEndButton.setOnClickListener {
             lifecycleScope.launch {
                 handleServiceEnd()
             }
         }
-    }
-
-    private fun ByteArray.toBitmap(): Bitmap? {
-        return BitmapFactory.decodeByteArray(this, 0, this.size)
-    }
-    private fun Bitmap.toBottomCropped(targetRatio: Float = 4f/3f) : Bitmap {
-        val srcWidth = this.width
-        val srcHeight = this.height
-
-        val targetHeight = (srcWidth / targetRatio).toInt()
-
-        if (targetHeight >= srcHeight) return this
-
-        val top = (srcHeight - targetHeight) / 2
-
-        return Bitmap.createBitmap(
-            this,
-            0, top, srcWidth,
-            targetHeight
-        )
+        binding.serviceStartButton.setOnClickListener {
+            lifecycleScope.launch {
+                handleWakewordDetected()
+            }
+        }
     }
 
     private fun observeViewModel() {
@@ -297,6 +258,11 @@ class WorkingActivity : AppCompatActivity() {
 //                            "작업 완료 처리 실패",
 //                            Toast.LENGTH_SHORT).show()
                     }
+                }
+            }
+            launch {
+                workingViewModel.cvAnswer.collect { value ->
+
                 }
             }
             launch {
@@ -353,8 +319,8 @@ class WorkingActivity : AppCompatActivity() {
                 Log.d("RTC", "LiveKit 토큰 수신: ${if (token.isNotBlank()) "있음 (길이: ${token.length})" else "없음"}")
                 if (token.isNotBlank()) {
 
-                    val intent = Intent(this@WorkingActivity, DemonstrateActivity::class.java).apply {
-//                    val intent = Intent(this@WorkingActivity, CallActivity::class.java).apply {
+//                    val intent = Intent(this@WorkingActivity, DemonstrateActivity::class.java).apply {
+                    val intent = Intent(this@WorkingActivity, CallActivity::class.java).apply {
                         putExtra("server_url", "wss://onair-tbfd0pr1.livekit.cloud")
                         putExtra("token", token)
                         putExtra("description", description)
@@ -405,9 +371,6 @@ class WorkingActivity : AppCompatActivity() {
 
         // 라즈베리파이 제어 API 초기화
         raspberryPiControlRepository = RaspberryPiControlRepository(socketIoSttClient)
-
-        // 토큰 관리자 초기화
-//        tokenManager = TokenManager(this)
 
         // 토큰 갱신
         lifecycleScope.launch {
@@ -555,25 +518,7 @@ class WorkingActivity : AppCompatActivity() {
 
                     // WebRTC 연결 요청 전송 (OPERATOR와 동일한 로직)
                     lifecycleScope.launch {
-//                        val accessToken = authRepository.getAccessToken()
-//                        Log.i(TAG, "🔑 AccessToken 확인: 길이=${accessToken.length}, 비어있음=${accessToken.isEmpty()}")
-//
-//                        if (accessToken.isNotEmpty()) {
-//                            // 작업자가 요청할 시 receiverAccountId는 -1로 고정 (API 문서 참조)
-//                            val receiverAccountId = -1L
-//                            Log.i(TAG, "📤 WebRTC 연결 요청 전송 시작: receiverAccountId=$receiverAccountId")
-//
-//                            val success = webRtcRepository.requestConnection(accessToken, receiverAccountId)
-//                            if (success) {
-//                                Log.i(TAG, "✅ WebRTC 연결 요청 완료 (서버 응답 성공)")
-//                            } else {
-//                                Log.e(TAG, "❌ WebRTC 연결 요청 실패 (서버 응답 실패 또는 오류)")
-//                            }
-//                        } else {
-//                            Log.e(TAG, "❌ AccessToken이 없어 WebRTC 연결 요청을 보낼 수 없습니다.")
-//                        }
                         workingViewModel.requestCall()
-                        
                         // 라즈베리파이 제어: 마이크 resume + 모드 buffered 유지 (OPERATOR와 동일한 로직)
                         raspberryPiControlRepository.notifyIntentDone("OPERATOR")
                     }
@@ -585,18 +530,6 @@ class WorkingActivity : AppCompatActivity() {
                 socketIoSttClient.sendCvDetectionFailedAudioCompleted()
             }
         }
-    }
-
-    private fun handleCvDetectionAnomaly(cvAnomaly: CvDetectionAnomalyDto) {
-        // showCvAnswer() 함수가 cvAnswer Flow를 collect하고 있어서
-        // SocketIoSttClient에서 _cvAnswer.tryEmit(cvAnomaly)를 호출하면
-        // 자동으로 showCvAnswer()의 collect가 트리거됩니다.
-        // 따라서 이 함수에서는 추가 처리 없이 로그만 남깁니다.
-        Log.i(TAG, "============================================================")
-        Log.i(TAG, "✅ [모바일] CV 탐지 이상 이벤트 수신 (showCvAnswer 함수로 처리)")
-        Log.i(TAG, "   메시지: ${cvAnomaly.message}")
-        Log.i(TAG, "   💡 SocketIoSttClient에서 cvAnswer Flow에 emit → showCvAnswer() 자동 실행")
-        Log.i(TAG, "============================================================")
     }
 
     private fun handleCvDetectionNormal(cvNormal: CvDetectionNormalDto) {
@@ -643,21 +576,17 @@ class WorkingActivity : AppCompatActivity() {
 
     private fun handleWakewordDetected() {
         Log.i(TAG, "📩 Wakeword 감지 이벤트 수신: 음성 파일 재생 시작")
-        
-        // Wakeword 감지 시 communication_close 플래그 리셋 (새로운 서비스 시작)
-//        hasSentCommunicationClose = false
 
         lifecycleScope.launch {
             try {
                 Log.i(TAG, "🔊 로컬 음성 파일 재생 시작: $WAKEWORD_AUDIO_FILE")
-
 
                 runOnUiThread {
                     binding.serviceStartButton.visibility = View.GONE
                     showModal("on AiR")
                 }
 
-                mediaPlayerController.playLocalAudio(WAKEWORD_AUDIO_FILE) {
+                mediaPlayerController.playLocalAudio("ai_on.mp3") {
                     Log.i(TAG, "✅ 로컬 음성 파일 재생 완료")
 
                     val success = socketIoSttClient.sendWakewordAudioCompleted()
@@ -1026,20 +955,11 @@ class WorkingActivity : AppCompatActivity() {
             onIntentResult = { intentResult ->
                 handleIntentResult(intentResult)
             },
-            onFinalAnswer = { finalAnswer ->
-//                handleFinalAnswerFromSocket(finalAnswer)
-            },
             onCvDetectionNormal = { cvNormal ->
                 handleCvDetectionNormal(cvNormal)
             },
             onCvDetectionFailed = { cv ->
                 handleCvDetectionFailed(cv)
-            },
-            onCvDetectionAnomaly = { cvAnomaly ->
-//                handleCvDetectionAnomaly(cvAnomaly)
-            },
-            onWakewordDetected = {
-//                handleWakewordDetected()
             },
             onPlayServiceEndAudio = { audioFile ->
                 handlePlayServiceEndAudio(audioFile)
@@ -1062,76 +982,11 @@ class WorkingActivity : AppCompatActivity() {
         socketIoSttClient.setCallbacks(
             onSttResult = null,
             onIntentResult = null,
-            onFinalAnswer = null,
-            onStartSseConnection = null,
             onCvDetectionNormal = null,
             onCvDetectionFailed = null,
-            onCvDetectionAnomaly = null,
-            onWakewordDetected = null,
             onPlayServiceEndAudio = null,
         )
     }
-    
-    /**
-     * 비정상 종료 시 wakeword 대기 상태로 복귀하기 위한 통신 종료 이벤트 전송
-     */
-//    private fun sendCommunicationCloseForRecovery() {
-//        try {
-//            if (::socketIoSttClient.isInitialized && socketIoSttClient.isConnected()) {
-//                val success = socketIoSttClient.sendCommunicationClose()
-//                if (success) {
-//                    Log.i(TAG, "✅ 통신 종료 이벤트 전송 완료 (wakeword 대기 상태로 복귀)")
-//                    hasSentCommunicationClose = true
-//                } else {
-//                    Log.w(TAG, "⚠️ 통신 종료 이벤트 전송 실패 (Socket.IO 연결 상태 확인 필요)")
-//                }
-//            } else {
-//                Log.w(TAG, "⚠️ Socket.IO 클라이언트가 연결되어 있지 않아 통신 종료 이벤트를 전송할 수 없습니다")
-//            }
-//        } catch (e: Exception) {
-//            Log.e(TAG, "❌ 통신 종료 이벤트 전송 중 오류: ${e.message}")
-//            e.printStackTrace()
-//        }
-//    }
-    
-    /**
-     * 상태 초기화 및 wakeword 대기 상태로 복귀
-     * (onResume에서 호출하여 비정상 종료 후 다시 들어온 경우를 처리)
-     */
-//    private fun resetToWakewordWaitingState() {
-//        try {
-//            Log.i(TAG, "🔄 상태 초기화 시작")
-//
-//            // UI 초기화
-//            runOnUiThread {
-//                hideModal()
-//            }
-//
-//            // 통신 종료 이벤트 전송 (wakeword 대기 상태로 복귀)
-//            // 중복 전송 방지: 아직 전송하지 않은 경우에만 전송
-//            if (::socketIoSttClient.isInitialized && socketIoSttClient.isConnected()) {
-//                if (!hasSentCommunicationClose) {
-//                    val success = socketIoSttClient.sendCommunicationClose()
-//                    if (success) {
-//                        Log.i(TAG, "✅ 상태 초기화 및 wakeword 대기 상태로 복귀 완료")
-//                        hasSentCommunicationClose = true
-//                    } else {
-//                        Log.w(TAG, "⚠️ 통신 종료 이벤트 전송 실패 (Socket.IO 연결 상태 확인 필요)")
-//                    }
-//                } else {
-//                    Log.i(TAG, "ℹ️ communication_close 이벤트는 이미 전송됨 (상태 초기화만 수행)")
-//                }
-//            } else {
-//                Log.w(TAG, "⚠️ Socket.IO 클라이언트가 연결되어 있지 않아 상태 복귀 이벤트를 전송할 수 없습니다")
-//            }
-//
-//            // 다음 wakeword 감지를 위해 플래그 리셋
-////            hasSentCommunicationClose = false
-//        } catch (e: Exception) {
-//            Log.e(TAG, "❌ 상태 초기화 중 오류: ${e.message}")
-//            e.printStackTrace()
-//        }
-//    }
     private suspend fun handleServiceEnd() {
         Log.d(TAG, "Service 종료")
         mediaPlayerController.stop()
